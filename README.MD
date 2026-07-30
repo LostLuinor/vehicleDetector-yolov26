@@ -1,150 +1,159 @@
 # Multi-Class Vehicle Detection
 
-A comprehensive computer vision project for computing dataset statistics, visualizations, and data preprocessing for a multi-class vehicle detection task using YOLO-format labels.
-
----
+Computer vision project for preparing, analyzing, and training a multi-class vehicle detection system built around YOLO-format labels.
 
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
 2. [Dataset Structure & Statistics](#dataset-structure--statistics)
-3. [Phase 1: Data Preparation & Preprocessing](#phase-1-data-preparation--preprocessing)
-4. [Phase 2: Dataset Analysis & Visualization](#phase-2-dataset-analysis--visualization)
-5. [Future Phases (Model Architecture & Training)](#future-phases)
-
----
+3. [Data Preparation & Preprocessing](#data-preparation--preprocessing)
+4. [Dataset Analysis & Visualization](#dataset-analysis--visualization)
+5. [Model Architecture](#model-architecture)
+6. [Loss Functions](#loss-functions)
+7. [Training Pipeline](#training-pipeline)
+8. [Evaluation](#evaluation)
+9. [Project Layout](#project-layout)
+10. [Future Work](#future-work)
 
 ## Project Overview
 
-This project implements a data preparation and analysis pipeline for a **multi-class vehicle detection system** using:
+This repository focuses on the data engineering side of a multi-class vehicle detection workflow. It includes dataset splitting, preprocessing, augmentation, and inspection tools built around YOLO labels.
 
-* **Vehicle Classes:** 4 distinct classes (0, 1, 2, 3).
+Key details:
 
-
-* **Label Format:** YOLO standard format representing class index, normalized center X, normalized center Y, normalized width, and normalized height.
-
-
-* **Core Libraries:** The pipeline relies on PyTorch, OpenCV, Albumentations, and Pandas for processing and visualization.
-
-
-
----
+- 4 vehicle classes: `0`, `1`, `2`, and `3`
+- YOLO annotation format: class index, normalized center `x`, normalized center `y`, normalized width, normalized height
+- Main tools: PyTorch, OpenCV, Albumentations, Pandas, Matplotlib, and Seaborn
+- Base checkpoint: `yolo26m.pt`
+- Target input resolution: `640 x 640`
 
 ## Dataset Structure & Statistics
 
-The dataset has been successfully processed and split into training, validation, and testing sets.
+The dataset is already organized into training, validation, and test splits.
 
-### Splits and Organization
+### Split Summary
 
-The dataset is divided using a `carve_test_split` function, which attempts a stratified split based on class presence and falls back to a random split if stratification fails.
+| Split | Images |
+| --- | ---: |
+| Train | 7,066 |
+| Val | 982 |
+| Test | 786 |
 
-**Image Counts by Split:**
+### Train Class Distribution
 
-* **Train:** 7,066 images.
+| Class | Instances |
+| --- | ---: |
+| 0 | 1,052 |
+| 1 | 47,517 |
+| 2 | 4,529 |
+| 3 | 5,004 |
 
+The split logic uses a `carve_test_split` approach that tries to preserve class presence when possible and falls back to a random split when stratification is not feasible.
 
-* **Val:** 982 images.
+The current training notebook and analysis workflow are centered on the processed dataset already present in the repository, with the same preprocessing assumptions used across the notebooks and starter scripts.
 
-
-* **Test:** 786 images.
-
-
-
-**Class Distribution (Train Split):**
-
-* **Class 0:** 1,052 instances.
-
-
-* **Class 1:** 47,517 instances.
-
-
-* **Class 2:** 4,529 instances.
-
-
-* **Class 3:** 5,004 instances.
-
-
-
----
-
-## Phase 1: Data Preparation & Preprocessing
+## Data Preparation & Preprocessing
 
 ### Data Loading
 
-* A custom `VehicleDataset` PyTorch class loads image and YOLO-format label pairs.
+- A custom `VehicleDataset` class loads image and YOLO label pairs.
+- Images are returned as normalized float tensors with shape `[3, H, W]`.
+- Inputs are resized to `640 x 640` for training and evaluation consistency.
 
+### Augmentation Pipeline
 
-* The dataset returns images as a `FloatTensor` of shape `[3, H, W]` that are normalized to a `[0,1]` range.
+The project uses Albumentations for both disk-based export transforms and in-memory training transforms.
 
+Training augmentations include:
 
-* Images are resized to a default target dimension of 640x640.
+- `RandomResizedCrop` to `640 x 640` with scale range `0.5` to `1.0`
+- `HorizontalFlip` with 50% probability
+- `ColorJitter` for brightness, contrast, saturation, and hue variation
+- `GaussNoise` with 20% probability
+- `Blur` with blur limit `3` and 10% probability
+- `RandomRain` with 10% probability
+- ImageNet normalization
 
+Validation augmentations include:
 
+- `LongestMaxSize` to 640 pixels
+- `PadIfNeeded` to `640 x 640` with a constant fill value of `114`
+- ImageNet normalization
 
-### Data Augmentation Pipeline
+## Model Architecture
 
-The project utilizes `Albumentations` for both disk-export transforms and memory transforms during training.
+The planned detector is organized as a `VehicleDetectorYOLOv26` pipeline that combines a frozen YOLOv26 backbone with a custom neck and attention bridge.
 
-**Training Augmentations (`train_transforms`):**
+Architecture highlights:
 
-* `RandomResizedCrop` with a target size of 640x640 and a scale range of 0.5 to 1.0.
+- Modified FPN + PAN neck with deformable `3 x 3` fusion blocks at merge points
+- Dual-Domain Attention that mixes spatial and frequency-domain features
+- `ChannelAttention`, `SpatialAttention` with kernel size `7`, and `FrequencyAttention` using 2D FFTs
+- Separate attention weights across pyramid scales before the detection heads
 
+The model design is intended to improve feature fusion and make the detection heads more robust on dense and imbalanced vehicle scenes.
 
-* `HorizontalFlip` applied with a 50% probability.
+## Loss Functions
 
+The planned `VehicleDetectionLoss` combines multiple objectives to balance localization and classification quality.
 
-* `ColorJitter` adjusting brightness (0.3), contrast (0.3), saturation (0.3), and hue (0.1).
+- Classification loss: Varifocal loss with weight `0.5`
+- Box loss: CIoU loss with weight `7.5`
+- Distribution Focal Loss: weight `1.5` with `reg_max = 16`
+- Class imbalance handling: class weights tuned as `1.2`, `1.0`, `1.3`, and `1.4`
 
+This setup is aimed at improving box regression quality while keeping the classifier stable under uneven class frequencies.
 
-* `GaussNoise` applied with a 20% probability.
+## Training Pipeline
 
+The training plan uses a custom `Trainer` loop with modern optimization and stability features.
 
-* `Blur` with a blur limit of 3, applied with a 10% probability.
+- Optimizer: AdamW
+- Learning-rate schedule: OneCycleLR
+- Mixed precision: AMP with gradient scaling
+- EMA: model weight smoothing with decay `0.9999`
+- Gradient accumulation: 4 steps
+- Early stopping: stop after 20 epochs without mAP@0.5 improvement
 
+A short smoke-training run was also used to validate the pipeline end to end:
 
-* `RandomRain` applied with a 10% probability to simulate weather variations.
+- 1 epoch at image size `256`
+- Batch size `4`
+- Baseline validation mAP@0.5: `0.155`
 
+## Evaluation
 
-* ImageNet `Normalize` standardizations.
+Evaluation is intended to focus on detection quality, class balance behavior, and whether the custom neck and attention bridge improve results over a plain baseline.
 
+The current notebook workflow already supports visual inspection, dataset sanity checks, and small validation runs, which makes it a practical starting point for later full-scale evaluation experiments.
 
+## Dataset Analysis & Visualization
 
-**Validation Augmentations (`val_transforms`):**
+The notebooks include checks that help verify the quality of the dataset before training:
 
-* `LongestMaxSize` scaling to 640 pixels.
+- Class-count bar charts built with Seaborn and Matplotlib
+- Split-wise aggregation of total class instances
+- Bounding-box overlays for randomly selected training images to verify YOLO coordinates visually
 
+The visualization step uses clear bounding boxes and labels to make annotation issues easier to spot quickly.
 
-* `PadIfNeeded` expanding to 640x640 using a constant border mode filled with a value of 114 to maintain aspect ratios.
+## Project Layout
 
+- `augmentedDataset/` - processed dataset split into train, val, and test
+- `data/` - dataset copy used by notebooks and experiments
+- `competition_starter/` - starter scripts for training, prediction, and setup verification
+- `shortTrainerWithGPU.ipynb` - GPU-focused notebook workflow
+- `shortTrainerWithPlot.ipynb` - notebook with plotting and dataset inspection utilities
+- `otherFiles/` - exploratory notebooks and supporting analysis
 
-* ImageNet `Normalize` standardizations.
+## Future Work
 
+The current repository centers on preprocessing and analysis. Planned next steps are:
 
+- Phase 3: Refine the model architecture and detection head design
+- Phase 4: Tune the loss functions and optimization strategy
+- Phase 5: Expand the training loop and experiment tracking
+- Phase 6: Run full evaluation and testing experiments
+- Phase 7: Deployment for an intelligent transportation system
 
----
-
-## Phase 2: Dataset Analysis & Visualization
-
-The notebook includes a robust analysis phase to verify data integrity before model training:
-
-* Bar charts generated via `seaborn` and `matplotlib` plot class counts across the augmented dataset by split.
-
-
-* Total class instances per split are aggregated and visualized to ensure proper distribution.
-
-
-* A bounding box visualization tool overlays YOLO labels onto random training images using lime green rectangle patches, drawing the class labels with a semi-transparent black background to verify coordinate accuracy.
-
-
-
----
-
-## Future Phases
-
-*(Note: The following sections represent the intended model architecture and deployment phases to be implemented alongside the completed data pipeline.)*
-
-* **Phase 3:** Model Architecture (Targeting YOLOv26 / Advanced attention mechanisms)
-* **Phase 4:** Loss Functions
-* **Phase 5:** Training Loop & Execution
-* **Phase 6:** Evaluation & Testing
-* **Phase 7:** Deployment (Intelligent Transportation System)
+If you want, the next logical improvement is to add a short "How to Run" section with notebook order, dependencies, and expected inputs.
